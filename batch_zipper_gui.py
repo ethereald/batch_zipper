@@ -1,3 +1,4 @@
+"""
 Description: Tkinter-based GUI for batch zipping/unzipping folders using JSON encoding, with progress bar and console log.
 """
 import os
