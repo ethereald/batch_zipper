@@ -155,9 +155,11 @@ def run_selected(op, paths, listbox, progress_bar=None, power_user=False):
     import queue
     import tkinter as tk
     import builtins
+    import time
     
     progress_queue = queue.Queue()
     operation_complete = threading.Event()
+    start_time = None
     
     def update_progress_bar():
         try:
@@ -166,8 +168,12 @@ def run_selected(op, paths, listbox, progress_bar=None, power_user=False):
                 if isinstance(progress, tuple):
                     current, total = progress
                     if progress_bar:
-                        progress_bar['maximum'] = total
-                        progress_bar['value'] = current
+                        if total > progress_bar['maximum']:
+                            progress_bar['maximum'] = total
+                        progress_bar['value'] = min(current, total)
+                        percentage = min(int((current / max(total, 1)) * 100), 100)
+                        style = ttk.Style()
+                        style.configure('text.Horizontal.TProgressbar', text=f'{percentage}%')
                         progress_bar.update_idletasks()
                 elif isinstance(progress, Exception):
                     messagebox.showerror("Error", str(progress))
@@ -178,41 +184,60 @@ def run_selected(op, paths, listbox, progress_bar=None, power_user=False):
             else:
                 if progress_bar:
                     progress_bar['value'] = 0
-                messagebox.showinfo("Done", f"{op.capitalize()} operation completed")
+                    style = ttk.Style()
+                    style.configure('text.Horizontal.TProgressbar', text='0%')
+                elapsed_time = time.time() - start_time if start_time else 0
+                messagebox.showinfo("Done", f"{op.capitalize()} operation completed in {elapsed_time:.1f} seconds")
     
     def progress_callback(current, total):
         progress_queue.put((current, total))
     
     def run_operation():
+        nonlocal start_time
         try:
+            # Initialize progress tracking
+            start_time = time.time()
+            total_files = 0
+            processed_files = 0
+            selected_folders = []
+
             if listbox is None:
-                # Process all paths
-                for folder in paths:
-                    if hasattr(builtins, '_console_log'):
-                        builtins._console_log.after(0, lambda: builtins._console_log.insert('end', f"Working on: {folder}\n"))
-                        builtins._console_log.after(0, lambda: builtins._console_log.see('end'))
-                    try:
-                        zipper_operation(folder, op, progress_callback)
-                    except Exception as e:
-                        progress_queue.put(e)
-                        break
+                selected_folders = paths
             else:
-                # Process selected paths
+                # Get selected paths
                 selected = listbox.curselection()
                 if not selected:
                     messagebox.showinfo("Info", "Select a path to run the operation.")
                     return
-                
-                for idx in selected:
-                    folder = paths[idx]
-                    if hasattr(builtins, '_console_log'):
-                        builtins._console_log.after(0, lambda: builtins._console_log.insert('end', f"Working on: {folder}\n"))
-                        builtins._console_log.after(0, lambda: builtins._console_log.see('end'))
-                    try:
-                        zipper_operation(folder, op, progress_callback)
-                    except Exception as e:
-                        progress_queue.put(e)
-                        break
+                selected_folders = [paths[idx] for idx in selected]
+            
+            # Count total files first
+            for folder in selected_folders:
+                if op == 'zip':
+                    total_files += sum(1 for _ in Path(folder).rglob('*') if _.is_file() and not str(_).lower().endswith('.json'))
+                else:  # unzip
+                    for json_file in Path(folder).glob('*.json'):
+                        try:
+                            with open(json_file, 'r') as f:
+                                total_files += len(json.load(f))
+                        except Exception:
+                            pass
+            
+            # Process each folder
+            for folder in selected_folders:
+                if hasattr(builtins, '_console_log'):
+                    builtins._console_log.after(0, lambda: builtins._console_log.insert('end', f"Working on: {folder}\n"))
+                    builtins._console_log.after(0, lambda: builtins._console_log.see('end'))
+                try:
+                    def folder_progress(current, _):
+                        nonlocal processed_files
+                        processed_files += 1
+                        progress_queue.put((processed_files, total_files))
+                    
+                    zipper_operation(folder, op, folder_progress)
+                except Exception as e:
+                    progress_queue.put(e)
+                    break
         finally:
             operation_complete.set()
     
@@ -324,7 +349,18 @@ def main():
     Button(button_frame, text="Zip Selected", width=15, command=lambda: run_selected('zip', paths, dir_listbox, progress_bar)).grid(row=0, column=2, padx=5)
     Button(button_frame, text="Unzip Selected", width=15, command=lambda: run_selected('unzip', paths, dir_listbox, progress_bar)).grid(row=0, column=3, padx=5)
 
-    progress_bar = ttk.Progressbar(root, orient='horizontal', length=600, mode='determinate')
+    # Create custom style for progress bar with text
+    style = ttk.Style()
+    style.layout('text.Horizontal.TProgressbar', 
+                [('Horizontal.Progressbar.trough',
+                  {'children': [('Horizontal.Progressbar.pbar',
+                               {'side': 'left', 'sticky': 'ns'})],
+                   'sticky': 'nswe'}),
+                 ('Horizontal.Progressbar.label', {'sticky': ''})])
+    style.configure('text.Horizontal.TProgressbar', text='0%')
+
+    progress_bar = ttk.Progressbar(root, orient='horizontal', length=600, 
+                                 mode='determinate', style='text.Horizontal.TProgressbar')
     progress_bar.pack(pady=(0,10))
 
     console_frame = tk.Frame(root)
