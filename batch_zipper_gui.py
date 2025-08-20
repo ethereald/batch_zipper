@@ -107,29 +107,33 @@ def save_config(config_path, paths):
     with open(config_path, 'w') as f:
         json.dump(config_obj, f, indent=2)
 
-def zipper_operation(folder, op):
+def zipper_operation(folder, op, progress_callback=None):
     """
     Perform zip or unzip operation on a folder.
     Args:
         folder (str): Path to the folder.
         op (str): Operation type ('zip' or 'unzip').
+        progress_callback (callable): Function to call with progress updates.
     Author: Kelvin
     """
     from zipper import zip_folder, unzip_folder
     import builtins
+    import threading
+    
     if hasattr(builtins, '_console_log'):
         _print = builtins.print
         def log_print(*args, **kwargs):
             msg = ' '.join(str(a) for a in args)
-            builtins._console_log.insert('end', msg + '\n')
-            builtins._console_log.see('end')
+            builtins._console_log.after(0, lambda: builtins._console_log.insert('end', msg + '\n'))
+            builtins._console_log.after(0, lambda: builtins._console_log.see('end'))
             _print(*args, **kwargs)
         builtins.print = log_print
+    
     try:
         if op == 'zip':
-            zip_folder(folder)
+            zip_folder(folder, progress_callback)
         elif op == 'unzip':
-            unzip_folder(folder)
+            unzip_folder(folder, progress_callback)
         else:
             messagebox.showerror("Error", f"Unknown operation: {op}")
     finally:
@@ -138,7 +142,7 @@ def zipper_operation(folder, op):
 
 def run_selected(op, paths, listbox, progress_bar=None, power_user=False):
     """
-    Run the selected zip/unzip operation for all or selected paths.
+    Run the selected zip/unzip operation for all or selected paths in a separate thread.
     Args:
         op (str): Operation type ('zip' or 'unzip').
         paths (list): List of folder paths.
@@ -147,45 +151,94 @@ def run_selected(op, paths, listbox, progress_bar=None, power_user=False):
         power_user (bool, optional): Whether power user mode is enabled.
     Author: Kelvin
     """
+    import threading
+    import queue
+    import tkinter as tk
     import builtins
-    def update_progress(current, total, bar):
-        bar['maximum'] = total
-        bar['value'] = current
-        bar.update_idletasks()
     
-    if listbox is None:
-        total = len(paths)
-        for i, folder in enumerate(paths, 1):
-            if hasattr(builtins, '_console_log'):
-                builtins._console_log.insert('end', f"Working on: {folder}\n")
-                builtins._console_log.see('end')
-            try:
-                zipper_operation(folder, op)
+    progress_queue = queue.Queue()
+    operation_complete = threading.Event()
+    
+    def update_progress_bar():
+        try:
+            while True:
+                progress = progress_queue.get_nowait()
+                if isinstance(progress, tuple):
+                    current, total = progress
+                    if progress_bar:
+                        progress_bar['maximum'] = total
+                        progress_bar['value'] = current
+                        progress_bar.update_idletasks()
+                elif isinstance(progress, Exception):
+                    messagebox.showerror("Error", str(progress))
+                    break
+        except queue.Empty:
+            if not operation_complete.is_set():
+                progress_bar.after(100, update_progress_bar)
+            else:
                 if progress_bar:
-                    update_progress(i, total, progress_bar)
-            except Exception as e:
-                messagebox.showerror("Error", f"Error processing {folder}: {str(e)}")
-                break
-        if progress_bar:
-            progress_bar['value'] = 0
-        messagebox.showinfo("Done", f"{op.capitalize()} completed for {len(paths)} path(s)")
-        return
-    selected = listbox.curselection()
-    if not selected:
-        messagebox.showinfo("Info", "Select a path to run the operation.")
-        return
-    total = len(selected)
-    for i, idx in enumerate(selected, 1):
-        folder = paths[idx]
-        if hasattr(builtins, '_console_log'):
-            builtins._console_log.insert('end', f"Working on: {folder}\n")
-            builtins._console_log.see('end')
-        zipper_operation(folder, op)
-        if progress_bar:
-            update_progress(i, total, progress_bar)
-    if progress_bar:
-        progress_bar['value'] = 0
-    messagebox.showinfo("Done", f"{op.capitalize()} completed for {len(selected)} path(s)")
+                    progress_bar['value'] = 0
+                messagebox.showinfo("Done", f"{op.capitalize()} operation completed")
+    
+    def progress_callback(current, total):
+        progress_queue.put((current, total))
+    
+    def run_operation():
+        try:
+            if listbox is None:
+                # Process all paths
+                for folder in paths:
+                    if hasattr(builtins, '_console_log'):
+                        builtins._console_log.after(0, lambda: builtins._console_log.insert('end', f"Working on: {folder}\n"))
+                        builtins._console_log.after(0, lambda: builtins._console_log.see('end'))
+                    try:
+                        zipper_operation(folder, op, progress_callback)
+                    except Exception as e:
+                        progress_queue.put(e)
+                        break
+            else:
+                # Process selected paths
+                selected = listbox.curselection()
+                if not selected:
+                    messagebox.showinfo("Info", "Select a path to run the operation.")
+                    return
+                
+                for idx in selected:
+                    folder = paths[idx]
+                    if hasattr(builtins, '_console_log'):
+                        builtins._console_log.after(0, lambda: builtins._console_log.insert('end', f"Working on: {folder}\n"))
+                        builtins._console_log.after(0, lambda: builtins._console_log.see('end'))
+                    try:
+                        zipper_operation(folder, op, progress_callback)
+                    except Exception as e:
+                        progress_queue.put(e)
+                        break
+        finally:
+            operation_complete.set()
+    
+    # Disable buttons during operation
+    for widget in progress_bar.master.winfo_children():
+        if isinstance(widget, (tk.Button, tk.Checkbutton)):
+            widget.configure(state='disabled')
+    
+    # Start the operation in a separate thread
+    thread = threading.Thread(target=run_operation)
+    thread.daemon = True
+    thread.start()
+    
+    # Start progress bar updates
+    update_progress_bar()
+    
+    # Re-enable buttons when complete
+    def check_completion():
+        if operation_complete.is_set():
+            for widget in progress_bar.master.winfo_children():
+                if isinstance(widget, (tk.Button, tk.Checkbutton)):
+                    widget.configure(state='normal')
+        else:
+            progress_bar.after(100, check_completion)
+    
+    check_completion()
 
 def add_path(paths, config_path, listbox):
     """

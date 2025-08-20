@@ -13,7 +13,8 @@ import random
 import string
 import gc  # For memory management
 
-CHUNK_SIZE = 16 * 1024 * 1024  # 16MB chunks for better performance
+# Constants
+CHUNK_SIZE = 16 * 1024 * 1024  # 16MB chunks for performance  # 16MB chunks for better performance
 MAX_ARCHIVE_SIZE = 256 * 1024 * 1024  # 256MB per JSON file
 MAX_BATCH_FILES = 1000  # Maximum number of files per batch
 
@@ -30,7 +31,7 @@ def zip_large_file(zip_handle, file_path, arcname):
 
 def process_files_batch(args):
     """Process a batch of files into encoded JSON using ZIP compression internally"""
-    files, folder, output_path = args
+    files, folder, output_path, progress_callback = args
     total_size = 0
     json_entries = []
     
@@ -39,6 +40,9 @@ def process_files_batch(args):
     buffer = io.BytesIO()  # Reuse buffer for all files
     
     # Process each file in the batch
+    total_files = sum(len(batch) for batch in [files])  # Total files in this batch
+    processed_files = 0
+    
     for file in files:
         try:
             rel_path = str(file.relative_to(folder))
@@ -59,6 +63,11 @@ def process_files_batch(args):
             json_entries.append({'r': rel_path, 'c': encoded})
             total_size += file.stat().st_size
             
+            # Update progress
+            processed_files += 1
+            if progress_callback:
+                progress_callback(processed_files, total_files)
+            
         except Exception as e:
             print(f"Error processing {file}: {e}")
     
@@ -73,7 +82,7 @@ def process_files_batch(args):
     
     return output_path, total_size
 
-def zip_folder(folder_path):
+def zip_folder(folder_path, progress_callback=None):
     """Create encoded JSON archives of a folder using ZIP compression internally"""
     output_dir = None
     if isinstance(folder_path, (list, tuple)):
@@ -92,13 +101,21 @@ def zip_folder(folder_path):
         output_dir = folder
         
     MAX_ARCHIVE_SIZE = 100 * 1024 * 1024  # 100MB per JSON file for better handling
-
-    # Collect all files (excluding JSON archives)
+    
+    # Collect all files first for accurate progress tracking
+    print("Scanning for files...")
     files = list(folder.rglob('*'))
     files = [f for f in files if f.is_file() and not str(f).lower().endswith('.json')]
     if not files:
         print("No files to archive.")
         return
+        
+    total_files = len(files)
+    processed_files = 0
+    
+    # Report initial progress
+    if progress_callback:
+        progress_callback(processed_files, total_files)
 
     # Group files into batches optimized for performance
     batches = []
@@ -129,6 +146,8 @@ def zip_folder(folder_path):
     # Process batches in parallel for maximum performance
     print(f"Processing {len(batches)} batch(es) of files...")
     successful_archives = []
+    total_files = sum(len(batch) for batch in batches)
+    processed_files = 0
     
     # Use optimal number of workers based on CPU cores and batch count
     workers = min(len(batches), mp.cpu_count() * 2)
@@ -137,7 +156,7 @@ def zip_folder(folder_path):
         futures = []
         for i, batch in enumerate(batches, 1):
             json_path = output_dir / f"archive_{i}.json"
-            futures.append(executor.submit(process_files_batch, (batch, folder, json_path)))
+            futures.append(executor.submit(process_files_batch, (batch, folder, json_path, progress_callback)))
         
         # Process results as they complete
         for i, future in enumerate(futures, 1):
@@ -171,7 +190,7 @@ def zip_folder(folder_path):
     else:
         print("No archives were created successfully.")
 
-def extract_json(json_path, destination):
+def extract_json(json_path, destination, start_offset=0, progress_callback=None):
     """Extract files from an encoded JSON archive"""
     import time
     start_time = time.time()
@@ -228,6 +247,8 @@ def extract_json(json_path, destination):
                             shutil.copyfileobj(source, dest, length=CHUNK_SIZE)
                         
                         extracted_files += 1
+                        if progress_callback:
+                            progress_callback(start_offset + extracted_files, total_entries)
                     
                 except Exception as e:
                     failed_files += 1
@@ -257,7 +278,7 @@ def extract_json(json_path, destination):
         print(f"Detailed error:\n{traceback.format_exc()}")
         return False
 
-def unzip_folder(folder_path):
+def unzip_folder(folder_path, progress_callback=None):
     """Extract JSON archives sequentially"""
     import time
     overall_start = time.time()
@@ -270,8 +291,22 @@ def unzip_folder(folder_path):
     if not json_files:
         print("No JSON archives found to extract.")
         return
+        
+    # Count total files from all archives for accurate progress tracking
+    total_files = 0
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r', encoding='utf-8') as jf:
+                entries = json.load(jf)
+                total_files += len(entries)
+        except Exception as e:
+            print(f"Error reading {json_file}: {e}")
     
-    # Calculate total size
+    # Report initial progress
+    if progress_callback:
+        progress_callback(0, total_files)
+    
+    # Calculate total size for logging
     total_size = sum(f.stat().st_size for f in json_files)
     print(f"\nFound {len(json_files)} JSON archives to extract"
           f" (Total size: {total_size / (1024*1024):.1f} MB)")
@@ -282,16 +317,23 @@ def unzip_folder(folder_path):
     
     successful_files = []
     failed_files = []
+    current_offset = 0
     
-    # Process one file at a time
+    # Process one file at a time with progress tracking
     for file_num, json_file in enumerate(json_files, 1):
         print(f"\nProcessing archive {file_num}/{len(json_files)}: {json_file.name}")
         extraction_start = time.time()
         
         try:
-            # Process the file
-            if extract_json(json_file, folder):
+            # Get number of files in current archive for progress offset
+            with open(json_file, 'r', encoding='utf-8') as jf:
+                entries = json.load(jf)
+                archive_file_count = len(entries)
+            
+            # Process the file with progress callback
+            if extract_json(json_file, folder, current_offset, progress_callback):
                 successful_files.append(json_file)
+                current_offset += archive_file_count
                 print(f"Successfully completed {json_file.name} in"
                       f" {time.time() - extraction_start:.1f}s")
             else:
@@ -307,24 +349,24 @@ def unzip_folder(folder_path):
             print(traceback.format_exc())
             failed_files.append(json_file)
         
-        # Report results
-        total_time = time.time() - overall_start
-        if successful_files:
-            print(f"\nSuccessfully extracted {len(successful_files)} archives"
+        # Report results periodically
+        if successful_files and (len(successful_files) % 5 == 0 or file_num == len(json_files)):
+            total_time = time.time() - overall_start
+            print(f"\nSuccessfully extracted {len(successful_files)}/{len(json_files)} archives"
                   f" in {total_time:.1f}s")
             
             # Only remove successfully processed archives
-            for json_file in successful_files:
+            for completed_file in successful_files[-5:]:  # Only process last batch
                 try:
-                    json_file.unlink()
+                    completed_file.unlink()
                 except Exception as e:
-                    print(f"Warning: Could not remove {json_file.name}: {e}")
-        
-        if failed_files:
-            print(f"\nWarning: Failed to extract {len(failed_files)} archives:")
-            for failed in failed_files:
-                print(f"- {failed.name}")
-            print("\nJSON files for failed extractions were not removed")
+                    print(f"Warning: Could not remove {completed_file.name}: {e}")
+    
+    if failed_files:
+        print(f"\nWarning: Failed to extract {len(failed_files)} archives:")
+        for failed in failed_files:
+            print(f"- {failed.name}")
+        print("\nJSON files for failed extractions were not removed")
 
 def main():
     if len(sys.argv) < 3:
