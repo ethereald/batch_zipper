@@ -136,7 +136,7 @@ def zipper_operation(folder, op):
         if hasattr(builtins, '_console_log'):
             builtins.print = _print
 
-def run_selected(op, paths, listbox, progress_bar=None):
+def run_selected(op, paths, listbox, progress_bar=None, power_user=False):
     """
     Run the selected zip/unzip operation for all or selected paths.
     Args:
@@ -144,6 +144,7 @@ def run_selected(op, paths, listbox, progress_bar=None):
         paths (list): List of folder paths.
         listbox (Listbox or None): Tkinter Listbox widget or None for all paths.
         progress_bar (ttk.Progressbar, optional): Progress bar widget.
+        power_user (bool, optional): Whether power user mode is enabled.
     Author: Kelvin
     """
     import builtins
@@ -151,16 +152,20 @@ def run_selected(op, paths, listbox, progress_bar=None):
         bar['maximum'] = total
         bar['value'] = current
         bar.update_idletasks()
-
+    
     if listbox is None:
         total = len(paths)
         for i, folder in enumerate(paths, 1):
             if hasattr(builtins, '_console_log'):
                 builtins._console_log.insert('end', f"Working on: {folder}\n")
                 builtins._console_log.see('end')
-            zipper_operation(folder, op)
-            if progress_bar:
-                update_progress(i, total, progress_bar)
+            try:
+                zipper_operation(folder, op)
+                if progress_bar:
+                    update_progress(i, total, progress_bar)
+            except Exception as e:
+                messagebox.showerror("Error", f"Error processing {folder}: {str(e)}")
+                break
         if progress_bar:
             progress_bar['value'] = 0
         messagebox.showinfo("Done", f"{op.capitalize()} completed for {len(paths)} path(s)")
